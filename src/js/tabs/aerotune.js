@@ -190,11 +190,12 @@ function analyzeLog(rows, motorTemp = 'WARM') {
     }
 
     // ── P GAIN ANALYSIS ──────────────────────────────────────────────────────
-    function analyzePGain(axis) {
+    function analyzePGain(axis, isLevelMode) {
         const spKey   = `setpoint[${axis}]`;
         const gyroKey = `gyroADC[${axis}]`;
-        const overshootPcts = [];
-        const lagFrames     = [];
+        const overshootPcts      = [];
+        const lagFrames          = [];
+        const zeroCrossingCounts = [];
 
         for (let i = 1; i + 30 < rows.length; i++) {
             const spPrev = Number(rows[i - 1][spKey] ?? 0);
@@ -205,10 +206,11 @@ function analyzeLog(rows, motorTemp = 'WARM') {
             if (absSP < 5) continue;
 
             // Peak absolute gyro in next 30 frames
-            let peakGyro = Math.abs(Number(rows[i][gyroKey] ?? 0));
+            let peakGyro  = Math.abs(Number(rows[i][gyroKey] ?? 0));
+            let peakFrame = i;
             for (let j = 1; j <= 30 && i + j < rows.length; j++) {
                 const g = Math.abs(Number(rows[i + j][gyroKey] ?? 0));
-                if (g > peakGyro) peakGyro = g;
+                if (g > peakGyro) { peakGyro = g; peakFrame = i + j; }
             }
 
             overshootPcts.push((peakGyro - absSP) / absSP * 100);
@@ -223,22 +225,63 @@ function analyzeLog(rows, motorTemp = 'WARM') {
                 }
             }
             if (!lagFound) lagFrames.push(30);
+
+            // Level mode: count zero crossings of (gyro − setpoint) after peak
+            if (isLevelMode) {
+                let crossings = 0;
+                for (let j = 1; j <= 20 && peakFrame + j < rows.length; j++) {
+                    const e1 = Number(rows[peakFrame + j - 1][gyroKey] ?? 0) - Number(rows[peakFrame + j - 1][spKey] ?? 0);
+                    const e2 = Number(rows[peakFrame + j][gyroKey]     ?? 0) - Number(rows[peakFrame + j][spKey]     ?? 0);
+                    if (e1 * e2 < 0) crossings++;
+                }
+                zeroCrossingCounts.push(crossings);
+            }
         }
 
-        return { overshootPcts, lagFrames };
+        return { overshootPcts, lagFrames, zeroCrossingCounts };
     }
 
-    const rollP  = analyzePGain(0);
-    const pitchP = analyzePGain(1);
+    // Detect level/angle mode: ANGLE_MODE is bit 1 (value 2) of flightModeFlags
+    const ANGLE_MODE_FLAG = 2;
+    let levelModeFrames = 0;
+    for (const row of rows) {
+        if (Number(row['flightModeFlags'] ?? 0) & ANGLE_MODE_FLAG) levelModeFrames++;
+    }
+    const isLevelMode = rows.length > 0 && (levelModeFrames / rows.length) > 0.5;
+
+    const rollP  = analyzePGain(0, isLevelMode);
+    const pitchP = analyzePGain(1, isLevelMode);
 
     const allOvershoots = [...rollP.overshootPcts, ...pitchP.overshootPcts];
     const allLags       = [...rollP.lagFrames,     ...pitchP.lagFrames];
+    const allCrossings  = [...rollP.zeroCrossingCounts, ...pitchP.zeroCrossingCounts];
 
     let pVerdict, pAction;
     if (allOvershoots.length === 0) {
         pVerdict = 'NO STEP INPUTS DETECTED';
         pAction  = 'No rapid stick inputs found. Fly with sharp, deliberate inputs to enable P analysis.';
+    } else if (isLevelMode) {
+        // Level mode: single overshoots are the auto-leveler returning to zero — ignore them.
+        // Only flag P TOO HIGH on sustained oscillations (3+ zero crossings after a step).
+        const modeNote     = 'Level mode detected — single overshoots ignored (auto-leveler), watching for oscillations only\n';
+        const avgOsc       = allCrossings.length > 0 ? allCrossings.reduce((a, b) => a + b, 0) / allCrossings.length : 0;
+        const avgOvershoot = allOvershoots.reduce((a, b) => a + b, 0) / allOvershoots.length;
+        // P TOO LOW: gyro peak below 30 % of setpoint → overshoot% < −70
+        const lowRespCount = allOvershoots.filter(o => o < -70).length;
+        const lowRespRatio = lowRespCount / allOvershoots.length;
+
+        if (avgOsc >= 3) {
+            pVerdict = 'P TOO HIGH ⚠';
+            pAction  = `${modeNote}Average oscillations after step: ${avgOsc.toFixed(1)} zero-crossings.\nP too high — reduce by 5–10. Symptom: bounce-back after flips/rolls.`;
+        } else if (lowRespRatio > 0.5) {
+            pVerdict = 'P TOO LOW';
+            pAction  = `${modeNote}Gyro response below 30% of setpoint in ${Math.round(lowRespRatio * 100)}% of step inputs.\nP too low — increase by 5–10. Symptom: slow/sloppy response.`;
+        } else {
+            pVerdict = 'P GAINS LOOK GOOD ✓';
+            pAction  = `${modeNote}Average oscillations: ${avgOsc.toFixed(1)}, overshoot: ${avgOvershoot.toFixed(1)}%. P tracking well in level mode.`;
+        }
     } else {
+        // Acro mode: use overshoot threshold logic
         const avgOvershoot = allOvershoots.reduce((a, b) => a + b, 0) / allOvershoots.length;
         const avgLag       = allLags.reduce((a, b) => a + b, 0)       / allLags.length;
 
@@ -397,6 +440,7 @@ function formatAnalysisResult(r) {
         `  ROLL/PITCH P : ${r.pVerdict}`,
         SEP,
         r.pAction,
+        `Tip: level mode and acro mode are both valid for tuning. Level mode gives clean repeatable step inputs.`,
         ``,
         SEP,
         `  ROLL/PITCH D : ${r.dVerdict}`,
