@@ -1,3 +1,33 @@
+# AeroTune™ - Betaflight Configurator with Built-in PID Calculator
+
+**By Simon Jardaine – DronePioneer**
+
+## What is this?
+
+I originally built AeroTune™ as a standalone Python app for calculating Betaflight PIDs based on your build specs (motor KV, voltage, prop size, weight and flying style). After great feedback from the FPV community I decided to integrate it directly into Betaflight Configurator 10.10.0.
+
+This is a fork of Betaflight Configurator 10.10.0 with the following changes:
+- PID sliders removed — clean table-only interface
+- AeroTune™ tab added — calculate PIDs and apply directly to your FC with one click
+- Blackbox log analyzer built in — analyze filter effectiveness at high throttle
+
+## Download
+See the [Releases](https://github.com/simonjardine/betaflight-aerotune/releases) page for Windows installer and portable ZIP.
+
+## Issues & Feedback
+This is early days — please report any bugs or feedback in the [Issues](https://github.com/simonjardine/betaflight-aerotune/issues) tab. All feedback welcome!
+
+## Standalone App
+Want the full standalone AeroTune™ app? Available at [Gumroad](https://simonjardine.gumroad.com)
+
+
+
+
+
+
+
+
+
 # Betaflight Configurator
 
 ![Betaflight](http://static.rcgroups.net/forums/attachments/6/1/0/3/7/6/a9088900-228-bf_logo.jpg)
