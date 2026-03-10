@@ -171,19 +171,18 @@
                 <p>Enable Blackbox before flying:</p>
                 <ul>
                     <li>Configuration tab → Blackbox → Enable, Device = SD Card, Rate = 1/2</li>
-                    <li>Enable: Gyro, Accelerometer, Motor, PID, RC Command, Setpoint, <strong>Unfiltered Gyro</strong></li>
+                    <li>Enable: Gyro, Gyro (Unfiltered), Motor, PID, RC Commands, RPM, Setpoint, Accelerometer</li>
                 </ul>
                 <p>Flight pattern:</p>
                 <ul>
-                    <li>Level mode: Full left → right roll for 5 s, pause, full forward → back pitch for 5 s</li>
-                    <li>Acro mode: Slowly ramp throttle 0 → 100 % over 2 s, then land</li>
+                    <li>Level mode: Full left stick hold 3-5 seconds, pause, full right stick hold 3-5 seconds, pause, full forward hold 3-5 seconds, pause, full back hold 3-5 seconds</li>
                 </ul>
 
                 <h3>STEP 3: ANALYZE THE LOG</h3>
                 <ul>
-                    <li>Pull the SD card, open the <code>.BBL</code> file in <strong>Betaflight Blackbox Explorer</strong></li>
+                    <li>Pull the SD card, open the <code>.BBL</code> file in <a href="https://blackbox.betaflight.com/" target="_blank"><strong>Betaflight Blackbox Explorer</strong></a></li>
                     <li>Export as CSV (File → Export CSV)</li>
-                    <li>Load the CSV in the ANALYZER tab and click ANALYZE</li>
+                    <li>Come back to AeroTune Analyzer tab, load your CSV and click ANALYZE</li>
                 </ul>
 
                 <h3>INTERPRETING RESULTS</h3>
@@ -196,7 +195,11 @@
                 </ul>
 
                 <h3>FILTER RECOMMENDATION NOTE</h3>
-                <p>The Gyro Lowpass 2 value shown in the Calculator is a <em>starting point</em> based on prop size. Use the Analyzer results to fine-tune after flying.</p>
+                <ul>
+                    <li><strong>Gyro Lowpass 2:</strong> The value shown in the Calculator is a <em>starting point</em> based on prop size. Use the Analyzer results to fine-tune after flying.</li>
+                    <li><strong>Dynamic Notch Filter:</strong> Enable and adjust count based on analyzer results to target resonant frequencies.</li>
+                    <li><strong>Gyro RPM Filter:</strong> Enable if using bidirectional DSHOT — the most effective filter available for eliminating motor noise harmonics.</li>
+                </ul>
 
             </div>
         </div>
