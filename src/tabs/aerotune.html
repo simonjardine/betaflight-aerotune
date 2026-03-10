@@ -143,6 +143,15 @@
                 <div class="at-panel">
                     <div class="at-panel-header">📂 FLIGHT LOG ANALYSIS (HIGH THROTTLE)</div>
                     <div class="at-panel-body">
+                        <div class="at-form-row" style="margin-bottom:10px;">
+                            <label style="font-size:12px;color:var(--subtleText);">Motors after flight:</label>
+                            <div class="at-voltage-presets" id="at-motor-temp-btns">
+                                <button data-temp="COOL">COOL</button>
+                                <button data-temp="WARM" class="selected">WARM</button>
+                                <button data-temp="HOT">HOT</button>
+                            </div>
+                        </div>
+
                         <div class="at-file-row">
                             <label class="at-file-label" for="at-file-input">Select CSV File</label>
                             <input type="file" id="at-file-input" accept=".csv" style="display:none" />
@@ -171,7 +180,14 @@
                 <p>Enable Blackbox before flying:</p>
                 <ul>
                     <li>Configuration tab → Blackbox → Enable, Device = SD Card, Rate = 1/2</li>
+                    <li>Set logging rate to minimum 1kHz, ideally 2kHz for best frequency resolution.</li>
                     <li>Enable: Gyro, Gyro (Unfiltered), Motor, PID, RC Commands, RPM, Setpoint, Accelerometer</li>
+                    <li><strong>Betaflight 4.5+:</strong> raw gyro is always logged automatically.</li>
+                    <li><strong>Betaflight 4.3/4.4:</strong> set Debug Mode to <code>GYRO_SCALED</code> to capture unfiltered gyro data.</li>
+                </ul>
+                <p>Before flying:</p>
+                <ul>
+                    <li>Use fresh propellers — damaged props introduce false noise and will give inaccurate results.</li>
                 </ul>
                 <p>Flight pattern:</p>
                 <ul>

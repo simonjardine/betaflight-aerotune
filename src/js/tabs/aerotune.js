@@ -122,7 +122,7 @@ function parseBlackboxCSV(text) {
     return rows;
 }
 
-function analyzeLog(rows) {
+function analyzeLog(rows, motorTemp = 'WARM') {
     if (!rows || rows.length === 0) {
         return { error: 'No valid data found in log.' };
     }
@@ -182,8 +182,11 @@ function analyzeLog(rows) {
     if (effectiveness < 30 && avgRaw >= 30) {
         filterAction += '\nConsider enabling Dynamic Notch Filter or increasing notch count.';
     }
+    filterAction += '\nFresh props recommended before tuning — damaged props create false noise in logs.';
     if (hasRpmFilter) {
         filterAction += '\nRPM filter detected (eRPM data present) — it is active and helping suppress motor harmonics.';
+    } else {
+        filterAction += '\nEnable RPM filter — most effective filter available, requires bidirectional DSHOT.';
     }
 
     // ── P GAIN ANALYSIS ──────────────────────────────────────────────────────
@@ -241,13 +244,13 @@ function analyzeLog(rows) {
 
         if (avgOvershoot > 15) {
             pVerdict = 'P TOO HIGH ⚠';
-            pAction  = `Average overshoot: ${avgOvershoot.toFixed(1)}%.\nRoll/Pitch P too high — reduce by 5–10.`;
+            pAction  = `Average overshoot: ${avgOvershoot.toFixed(1)}%.\nP too high — reduce by 5–10. Symptom: bounce-back after flips/rolls.`;
         } else if (avgLag > 3 && avgOvershoot < 5) {
             pVerdict = 'P TOO LOW';
-            pAction  = `Average response lag: ${avgLag.toFixed(1)} frames.\nRoll/Pitch P too low — increase by 5–10.`;
+            pAction  = `Average response lag: ${avgLag.toFixed(1)} frames.\nP too low — increase by 5–10. Symptom: slow/sloppy response.`;
         } else {
             pVerdict = 'P GAINS LOOK GOOD ✓';
-            pAction  = `Average overshoot: ${avgOvershoot.toFixed(1)}%, lag: ${avgLag.toFixed(1)} frames. P gains look good.`;
+            pAction  = `Average overshoot: ${avgOvershoot.toFixed(1)}%, lag: ${avgLag.toFixed(1)} frames. P tracking well.`;
         }
     }
 
@@ -319,6 +322,22 @@ function analyzeLog(rows) {
     const filterNoiseDOsc = rollD.filterNoiseDOsc || pitchD.filterNoiseDOsc;
     const hasSteps        = rollD.stepCount > 0   || pitchD.stepCount > 0;
 
+    // ── Propwash detection ────────────────────────────────────────────────────
+    let propwashDetected = false;
+    for (let i = 1; i < rows.length && !propwashDetected; i++) {
+        const tPrev = Number(rows[i - 1]['rcCommand[3]'] ?? 1000);
+        const tCurr = Number(rows[i]['rcCommand[3]']     ?? 1000);
+        if (tPrev - tCurr > 200) {
+            let osc = 0;
+            for (let j = 1; j <= 30 && i + j < rows.length; j++) {
+                const g1 = Number(rows[i + j - 1]['gyroADC[0]'] ?? 0);
+                const g2 = Number(rows[i + j]['gyroADC[0]']     ?? 0);
+                if (g1 * g2 < 0) osc++;
+            }
+            if (osc >= 3) propwashDetected = true;
+        }
+    }
+
     let dVerdict, dAction;
     if (!hasSteps) {
         dVerdict = 'NO STEP INPUTS DETECTED';
@@ -328,13 +347,27 @@ function analyzeLog(rows) {
         dAction  = 'Unfiltered gyro is much noisier than filtered at high throttle, and D is still active.\nFix filters before increasing D — see FILTERS section.';
     } else if (avgCrossings > 3) {
         dVerdict = 'D TOO LOW ⚠';
-        dAction  = `Average zero-crossings after peak: ${avgCrossings.toFixed(1)}.\nD too low — increase by 3–5.`;
+        dAction  = `Average zero-crossings after peak: ${avgCrossings.toFixed(1)}.\nD too low — increase by 3–5. Symptom: propwash oscillations after throttle cuts.`;
+    } else if (avgDtoP > 1.5 && motorTemp === 'HOT') {
+        dVerdict = 'D TOO HIGH ⚠';
+        dAction  = `D/P ratio is ${avgDtoP.toFixed(2)} and motors are running HOT.\nD too high — reduce by 3–5. Check motor temps after flying.`;
     } else if (avgDtoP > 1.5) {
         dVerdict = 'D MAY BE TOO HIGH ⚠';
         dAction  = `D/P ratio is ${avgDtoP.toFixed(2)} — D may be too high.\nCheck motor temps and consider reducing D by 3–5.`;
     } else {
         dVerdict = 'D GAINS LOOK GOOD ✓';
         dAction  = `Average zero-crossings: ${avgCrossings.toFixed(1)}, D/P ratio: ${avgDtoP.toFixed(2)}. D gains look good.`;
+    }
+
+    // Append motor temp advisory to D action
+    if (motorTemp === 'HOT' && dVerdict === 'D GAINS LOOK GOOD ✓') {
+        dAction += '\nD gain too high or insufficient filtering — reduce D by 5–10 or increase filtering (motors HOT).';
+    } else if (motorTemp === 'COOL') {
+        dAction += '\nD gain may have headroom — could increase slightly (motors COOL after flight).';
+    }
+
+    if (propwashDetected) {
+        dAction += '\nPropwash detected — increase D by 3–5 or check filtering.';
     }
 
     return {
@@ -350,6 +383,7 @@ function analyzeLog(rows) {
         pAction,
         dVerdict,
         dAction,
+        motorTemp,
     };
 }
 
@@ -554,6 +588,12 @@ aerotune._setup = function () {
         });
     });
 
+    // ── Motor temp selector ──
+    $('#at-motor-temp-btns button').on('click', function () {
+        $('#at-motor-temp-btns button').removeClass('selected');
+        $(this).addClass('selected');
+    });
+
     // ── Log file input ──
     $('#at-file-input').on('change', function () {
         const file = this.files[0];
@@ -569,6 +609,8 @@ aerotune._setup = function () {
 
         $('#at-results-box').text('Parsing file…');
 
+        const motorTemp = $('#at-motor-temp-btns button.selected').data('temp') || 'WARM';
+
         const reader = new FileReader();
         reader.onload = function (e) {
             const text = e.target.result;
@@ -577,7 +619,7 @@ aerotune._setup = function () {
                 $('#at-results-box').text('ERROR: Could not find a valid Betaflight blackbox header.\nMake sure you exported a CSV from Blackbox Explorer (not the raw .BBL file).');
                 return;
             }
-            const result = analyzeLog(rows);
+            const result = analyzeLog(rows, motorTemp);
             $('#at-results-box').text(formatAnalysisResult(result));
         };
         reader.onerror = function () {
