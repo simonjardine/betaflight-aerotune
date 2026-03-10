@@ -122,26 +122,33 @@ function parseBlackboxCSV(text) {
     return rows;
 }
 
-function analyzeFilters(rows) {
+function analyzeLog(rows) {
     if (!rows || rows.length === 0) {
         return { error: 'No valid data found in log.' };
     }
 
+    // ── FILTER ANALYSIS ──────────────────────────────────────────────────────
     const rawVals      = [];
     const filteredVals = [];
     let   highThrottleCount = 0;
+
+    // Detect eRPM columns → RPM filter active
+    const hasRpmFilter = Object.keys(rows[0]).some(
+        k => /erpm/i.test(k) || /rpm\[/i.test(k),
+    );
 
     for (const row of rows) {
         const throttle = Number(row['rcCommand[3]'] ?? 1000);
         if (throttle > 1400) {
             highThrottleCount++;
-            const rawRoll  = Math.abs(Number(row['gyroUnfilt[0]'] ?? 0));
-            const rawPitch = Math.abs(Number(row['gyroUnfilt[1]'] ?? 0));
-            rawVals.push(rawRoll + rawPitch);
-
-            const filtRoll  = Math.abs(Number(row['gyroADC[0]'] ?? 0));
-            const filtPitch = Math.abs(Number(row['gyroADC[1]'] ?? 0));
-            filteredVals.push(filtRoll + filtPitch);
+            rawVals.push(
+                Math.abs(Number(row['gyroUnfilt[0]'] ?? 0)) +
+                Math.abs(Number(row['gyroUnfilt[1]'] ?? 0)),
+            );
+            filteredVals.push(
+                Math.abs(Number(row['gyroADC[0]'] ?? 0)) +
+                Math.abs(Number(row['gyroADC[1]'] ?? 0)),
+            );
         }
     }
 
@@ -149,32 +156,185 @@ function analyzeFilters(rows) {
         return { error: 'No high-throttle frames found (rcCommand[3] > 1400). Ensure you flew at high throttle and that unfiltered gyro logging was enabled.' };
     }
 
-    const avgRaw      = rawVals.reduce((a, b) => a + b, 0) / rawVals.length;
-    const avgFiltered = filteredVals.reduce((a, b) => a + b, 0) / filteredVals.length;
+    const avgRaw        = rawVals.reduce((a, b) => a + b, 0) / rawVals.length;
+    const avgFiltered   = filteredVals.reduce((a, b) => a + b, 0) / filteredVals.length;
     const effectiveness = avgRaw > 0 ? clamp((avgRaw - avgFiltered) / avgRaw * 100, 0, 100) : 0;
-    const throttlePct = (highThrottleCount / rows.length) * 100;
+    const throttlePct   = (highThrottleCount / rows.length) * 100;
 
-    let vibLevel, recommendation, action;
+    let vibLevel, filterAction;
     if (avgRaw < 15) {
-        vibLevel = 'CLEAN ✓';
-        recommendation = 'EXCELLENT ✓✓';
-        action = 'Your filters are well-tuned. No changes needed.';
+        vibLevel     = 'CLEAN ✓';
+        filterAction = 'Your filters are well-tuned. No changes needed.';
     } else if (avgRaw < 20) {
-        vibLevel = 'GOOD ✓';
-        recommendation = 'GOOD ✓';
-        action = 'Gyro Lowpass 2: keep current setting.\nD-term Lowpass: consider slight increase (less aggressive).';
+        vibLevel     = 'GOOD ✓';
+        filterAction = 'Gyro Lowpass 2: keep current setting.\nD-term Lowpass: consider slight increase (less aggressive).';
     } else if (avgRaw < 30) {
-        vibLevel = 'FAIR';
-        recommendation = 'FAIR';
-        action = 'Gyro Lowpass 2: lower by ~30 Hz.\nD-term Lowpass: lower by ~20 Hz.\nRe-fly and re-analyze.';
+        vibLevel     = 'FAIR';
+        filterAction = 'Gyro Lowpass 2: lower by ~30 Hz.\nD-term Lowpass: lower by ~20 Hz.\nRe-fly and re-analyze.';
     } else if (avgRaw < 50) {
-        vibLevel = 'WEAK ⚠';
-        recommendation = 'WEAK ⚠';
-        action = 'Gyro Lowpass 2: lower by ~50 Hz.\nD-term Lowpass: lower by ~30 Hz.\nConsider enabling a Notch filter.';
+        vibLevel     = 'WEAK ⚠';
+        filterAction = 'Gyro Lowpass 2: lower by ~50 Hz.\nD-term Lowpass: lower by ~30 Hz.\nConsider enabling a Notch filter.';
     } else {
-        vibLevel = 'VERY WEAK 🔴';
-        recommendation = 'VERY WEAK 🔴';
-        action = 'Gyro Lowpass 2: reduce aggressively (~100 Hz).\nD-term: lower significantly.\nEnable all available filters.\nCheck for mechanical vibration sources.';
+        vibLevel     = 'VERY WEAK 🔴';
+        filterAction = 'Gyro Lowpass 2: reduce aggressively (~100 Hz).\nD-term: lower significantly.\nEnable all available filters.\nCheck for mechanical vibration sources.';
+    }
+
+    if (effectiveness < 30 && avgRaw >= 30) {
+        filterAction += '\nConsider enabling Dynamic Notch Filter or increasing notch count.';
+    }
+    if (hasRpmFilter) {
+        filterAction += '\nRPM filter detected (eRPM data present) — it is active and helping suppress motor harmonics.';
+    }
+
+    // ── P GAIN ANALYSIS ──────────────────────────────────────────────────────
+    function analyzePGain(axis) {
+        const spKey   = `setpoint[${axis}]`;
+        const gyroKey = `gyroADC[${axis}]`;
+        const overshootPcts = [];
+        const lagFrames     = [];
+
+        for (let i = 1; i + 30 < rows.length; i++) {
+            const spPrev = Number(rows[i - 1][spKey] ?? 0);
+            const spCurr = Number(rows[i][spKey]     ?? 0);
+            if (Math.abs(spCurr - spPrev) <= 20) continue;
+
+            const absSP = Math.abs(spCurr);
+            if (absSP < 5) continue;
+
+            // Peak absolute gyro in next 30 frames
+            let peakGyro = Math.abs(Number(rows[i][gyroKey] ?? 0));
+            for (let j = 1; j <= 30 && i + j < rows.length; j++) {
+                const g = Math.abs(Number(rows[i + j][gyroKey] ?? 0));
+                if (g > peakGyro) peakGyro = g;
+            }
+
+            overshootPcts.push((peakGyro - absSP) / absSP * 100);
+
+            // Lag: frames until |gyro| reaches 90 % of |setpoint|
+            let lagFound = false;
+            for (let j = 1; j <= 30 && i + j < rows.length; j++) {
+                if (Math.abs(Number(rows[i + j][gyroKey] ?? 0)) >= absSP * 0.9) {
+                    lagFrames.push(j);
+                    lagFound = true;
+                    break;
+                }
+            }
+            if (!lagFound) lagFrames.push(30);
+        }
+
+        return { overshootPcts, lagFrames };
+    }
+
+    const rollP  = analyzePGain(0);
+    const pitchP = analyzePGain(1);
+
+    const allOvershoots = [...rollP.overshootPcts, ...pitchP.overshootPcts];
+    const allLags       = [...rollP.lagFrames,     ...pitchP.lagFrames];
+
+    let pVerdict, pAction;
+    if (allOvershoots.length === 0) {
+        pVerdict = 'NO STEP INPUTS DETECTED';
+        pAction  = 'No rapid stick inputs found. Fly with sharp, deliberate inputs to enable P analysis.';
+    } else {
+        const avgOvershoot = allOvershoots.reduce((a, b) => a + b, 0) / allOvershoots.length;
+        const avgLag       = allLags.reduce((a, b) => a + b, 0)       / allLags.length;
+
+        if (avgOvershoot > 15) {
+            pVerdict = 'P TOO HIGH ⚠';
+            pAction  = `Average overshoot: ${avgOvershoot.toFixed(1)}%.\nRoll/Pitch P too high — reduce by 5–10.`;
+        } else if (avgLag > 3 && avgOvershoot < 5) {
+            pVerdict = 'P TOO LOW';
+            pAction  = `Average response lag: ${avgLag.toFixed(1)} frames.\nRoll/Pitch P too low — increase by 5–10.`;
+        } else {
+            pVerdict = 'P GAINS LOOK GOOD ✓';
+            pAction  = `Average overshoot: ${avgOvershoot.toFixed(1)}%, lag: ${avgLag.toFixed(1)} frames. P gains look good.`;
+        }
+    }
+
+    // ── D GAIN ANALYSIS ──────────────────────────────────────────────────────
+    function analyzeDGain(axis) {
+        const spKey      = `setpoint[${axis}]`;
+        const gyroKey    = `gyroADC[${axis}]`;
+        const gyroUnfKey = `gyroUnfilt[${axis}]`;
+        const axisDKey   = `axisD[${axis}]`;
+        const axisPKey   = `axisP[${axis}]`;
+
+        const zeroCrossingCounts = [];
+        const dToPRatios         = [];
+        let hiThrDOscCount = 0;
+        let hiThrCount     = 0;
+
+        for (let i = 1; i + 21 < rows.length; i++) {
+            const spPrev = Number(rows[i - 1][spKey] ?? 0);
+            const spCurr = Number(rows[i][spKey]     ?? 0);
+            if (Math.abs(spCurr - spPrev) <= 20) continue;
+            if (Math.abs(spCurr) < 5) continue;
+
+            // Find peak gyro in next 30 frames
+            let peakFrame = i;
+            let peakGyro  = Math.abs(Number(rows[i][gyroKey] ?? 0));
+            for (let j = 1; j <= 30 && i + j < rows.length; j++) {
+                const g = Math.abs(Number(rows[i + j][gyroKey] ?? 0));
+                if (g > peakGyro) { peakGyro = g; peakFrame = i + j; }
+            }
+
+            // Zero crossings of (gyroADC − setpoint) in 20 frames after peak
+            let crossings = 0;
+            for (let j = 1; j <= 20 && peakFrame + j < rows.length; j++) {
+                const e1 = Number(rows[peakFrame + j - 1][gyroKey] ?? 0) - Number(rows[peakFrame + j - 1][spKey] ?? 0);
+                const e2 = Number(rows[peakFrame + j][gyroKey]     ?? 0) - Number(rows[peakFrame + j][spKey]     ?? 0);
+                if (e1 * e2 < 0) crossings++;
+            }
+            zeroCrossingCounts.push(crossings);
+
+            // D/P ratio at peak frame
+            const dVal = Math.abs(Number(rows[peakFrame][axisDKey] ?? 0));
+            const pVal = Math.abs(Number(rows[peakFrame][axisPKey] ?? 0));
+            if (pVal > 1) dToPRatios.push(dVal / pVal);
+        }
+
+        // High-throttle filter-noise check: gyroUnfilt >> gyroADC but D still active
+        for (const row of rows) {
+            if (Number(row['rcCommand[3]'] ?? 1000) > 1400) {
+                hiThrCount++;
+                const unfilt = Math.abs(Number(row[gyroUnfKey] ?? 0));
+                const filt   = Math.abs(Number(row[gyroKey]    ?? 0));
+                if (unfilt > filt * 2 && Math.abs(Number(row[axisDKey] ?? 0)) > 20) hiThrDOscCount++;
+            }
+        }
+
+        return {
+            avgCrossings:    zeroCrossingCounts.length > 0 ? zeroCrossingCounts.reduce((a, b) => a + b, 0) / zeroCrossingCounts.length : 0,
+            avgDtoP:         dToPRatios.length > 0         ? dToPRatios.reduce((a, b) => a + b, 0)         / dToPRatios.length         : 0,
+            filterNoiseDOsc: hiThrCount > 0 && (hiThrDOscCount / hiThrCount) > 0.3,
+            stepCount:       zeroCrossingCounts.length,
+        };
+    }
+
+    const rollD  = analyzeDGain(0);
+    const pitchD = analyzeDGain(1);
+
+    const avgCrossings    = (rollD.avgCrossings + pitchD.avgCrossings) / 2;
+    const avgDtoP         = (rollD.avgDtoP      + pitchD.avgDtoP)      / 2;
+    const filterNoiseDOsc = rollD.filterNoiseDOsc || pitchD.filterNoiseDOsc;
+    const hasSteps        = rollD.stepCount > 0   || pitchD.stepCount > 0;
+
+    let dVerdict, dAction;
+    if (!hasSteps) {
+        dVerdict = 'NO STEP INPUTS DETECTED';
+        dAction  = 'No rapid stick inputs found. Fly with sharp, deliberate inputs to enable D analysis.';
+    } else if (filterNoiseDOsc) {
+        dVerdict = 'FILTER NOISE LIMITING D ⚠';
+        dAction  = 'Unfiltered gyro is much noisier than filtered at high throttle, and D is still active.\nFix filters before increasing D — see FILTERS section.';
+    } else if (avgCrossings > 3) {
+        dVerdict = 'D TOO LOW ⚠';
+        dAction  = `Average zero-crossings after peak: ${avgCrossings.toFixed(1)}.\nD too low — increase by 3–5.`;
+    } else if (avgDtoP > 1.5) {
+        dVerdict = 'D MAY BE TOO HIGH ⚠';
+        dAction  = `D/P ratio is ${avgDtoP.toFixed(2)} — D may be too high.\nCheck motor temps and consider reducing D by 3–5.`;
+    } else {
+        dVerdict = 'D GAINS LOOK GOOD ✓';
+        dAction  = `Average zero-crossings: ${avgCrossings.toFixed(1)}, D/P ratio: ${avgDtoP.toFixed(2)}. D gains look good.`;
     }
 
     return {
@@ -185,26 +345,35 @@ function analyzeFilters(rows) {
         avgFiltered:      avgFiltered.toFixed(2),
         effectiveness:    effectiveness.toFixed(1),
         vibLevel,
-        recommendation,
-        action,
+        filterAction,
+        pVerdict,
+        pAction,
+        dVerdict,
+        dAction,
     };
 }
 
 function formatAnalysisResult(r) {
     if (r.error) return `ERROR: ${r.error}`;
+    const SEP = '════════════════════════════════════════════════════';
     return [
-        `Total frames analysed : ${r.totalFrames}`,
-        `High-throttle frames  : ${r.highThrottleCount} (${r.throttlePct}% of flight)`,
+        `Frames analysed : ${r.totalFrames}  |  High-throttle: ${r.highThrottleCount} (${r.throttlePct}%)`,
         ``,
-        `Avg raw gyro (hi-thr) : ${r.avgRaw}`,
-        `Avg filtered gyro     : ${r.avgFiltered}`,
-        `Filter effectiveness  : ${r.effectiveness}%`,
+        SEP,
+        `  ROLL/PITCH P : ${r.pVerdict}`,
+        SEP,
+        r.pAction,
         ``,
-        `Vibration level       : ${r.vibLevel}`,
-        `Overall rating        : ${r.recommendation}`,
+        SEP,
+        `  ROLL/PITCH D : ${r.dVerdict}`,
+        SEP,
+        r.dAction,
         ``,
-        `── RECOMMENDED ACTION ──────────────────────────────`,
-        r.action,
+        SEP,
+        `  FILTERS : ${r.vibLevel}  |  Effectiveness: ${r.effectiveness}%`,
+        SEP,
+        `Avg raw gyro (hi-thr): ${r.avgRaw}  |  Avg filtered: ${r.avgFiltered}`,
+        r.filterAction,
     ].join('\n');
 }
 
@@ -408,7 +577,7 @@ aerotune._setup = function () {
                 $('#at-results-box').text('ERROR: Could not find a valid Betaflight blackbox header.\nMake sure you exported a CSV from Blackbox Explorer (not the raw .BBL file).');
                 return;
             }
-            const result = analyzeFilters(rows);
+            const result = analyzeLog(rows);
             $('#at-results-box').text(formatAnalysisResult(result));
         };
         reader.onerror = function () {
